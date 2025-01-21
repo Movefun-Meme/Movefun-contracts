@@ -5,6 +5,7 @@ module pump::pump_fa {
     use std::string;
     use std::string::String;
     use std::vector;
+    use std::option::{Self, Option};
     use aptos_std::math64;
     use aptos_std::type_info::type_name;
     use aptos_framework::account;
@@ -14,34 +15,30 @@ module pump::pump_fa {
     use aptos_framework::coin::Coin;
     use aptos_framework::event;
     use aptos_framework::timestamp;
-    // use pump::dex;
     use pump::Liquid_Staking_Token;
+    use razor_amm::router;
 
     //errors
     const ERROR_INVALID_LENGTH: u64 = 1;
     const ERROR_NO_AUTH: u64 = 2;
     const ERROR_INITIALIZED: u64 = 3;
-    const ERROR_NOT_ALLOW_PRE_MINT: u64 = 4;
-    const ERROR_ALREADY_PUMP: u64 = 5;
-    const ERROR_PUMP_NOT_EXIST: u64 = 6;
-    const ERROR_PUMP_COMPLETED: u64 = 7;
-    const ERROR_PUMP_AMOUNT_IS_NULL: u64 = 8;
-    const ERROR_PUMP_AMOUNT_TO_LOW: u64 = 9;
-    const ERROR_TOKEN_DECIMAL: u64 = 10;
-    const ERROR_INSUFFICIENT_LIQUIDITY: u64 = 11;
-    const ERROR_SLIPPAGE_TOO_HIGH: u64 = 12;
-    const ERROR_OVERFLOW: u64 = 13;
-    const ERROR_PUMP_NOT_COMPLETED: u64 = 14;
-    const ERROR_EXCEED_TRANSFER_THRESHOLD: u64 = 15;
-    const ERROR_BELOW_TRANSFER_THRESHOLD: u64 = 16;
-    const ERROR_NOT_NORMAL_DEX: u64 = 17;
-    const ERROR_INSUFFICIENT_BALANCE: u64 = 18;
-    const ERROR_WAIT_DURATION_PASSED: u64 = 19;
-    const ERROR_AMOUNT_TOO_LOW: u64 = 20;
-    const ERROR_NO_LAST_BUYER: u64 = 21;
-    const ERROR_NOT_LAST_BUYER: u64 = 22;
-    const ERROR_WAIT_TIME_NOT_REACHED: u64 = 23;
-    const ERROR_NO_SELL_IN_HIGH_FEE_PERIOD: u64 = 24;
+    const ERROR_PUMP_NOT_EXIST: u64 = 4;
+    const ERROR_PUMP_COMPLETED: u64 = 5;
+    const ERROR_PUMP_AMOUNT_IS_NULL: u64 = 6;
+    const ERROR_TOKEN_DECIMAL: u64 = 7;
+    const ERROR_INSUFFICIENT_LIQUIDITY: u64 = 8;
+    const ERROR_SLIPPAGE_TOO_HIGH: u64 = 9;
+    const ERROR_OVERFLOW: u64 = 10;
+    const ERROR_PUMP_NOT_COMPLETED: u64 = 11;
+    const ERROR_EXCEED_TRANSFER_THRESHOLD: u64 = 12;
+    const ERROR_BELOW_TRANSFER_THRESHOLD: u64 = 13;
+    const ERROR_WAIT_DURATION_PASSED: u64 = 14;
+    const ERROR_AMOUNT_TOO_LOW: u64 = 15;
+    const ERROR_NO_LAST_BUYER: u64 = 16;
+    const ERROR_NOT_LAST_BUYER: u64 = 17;
+    const ERROR_WAIT_TIME_NOT_REACHED: u64 = 18;
+    const ERROR_NO_SELL_IN_HIGH_FEE_PERIOD: u64 = 19;
+    const ERROR_INSUFFICIENT_BALANCE: u64 = 20;
 
     // Decimal places for (8)
     const DECIMALS: u64 = 100_000_000;
@@ -57,9 +54,10 @@ module pump::pump_fa {
         initial_virtual_move_reserves: u64,
         token_decimals: u8,
         dex_transfer_threshold: u64,
-        wait_duration: u64, // 8 hours = 28800 seconds
+        wait_duration: u64, // 1 hours = 3600 seconds
         min_move_amount: u64, // Minimum purchase amount = 100_000_000 (1 MOVE)
-        high_fee: u64 // High fee rate period fee = 1000 (10%)
+        high_fee: u64, // High fee rate period fee = 1000 (10%)
+        deadline: u64
     }
 
     struct TokenList has key, store {
@@ -67,12 +65,12 @@ module pump::pump_fa {
     }
 
     struct Pool has key, store, copy, drop {
-        real_token_reserves: u64,
         virtual_token_reserves: u64,
         virtual_move_reserves: u64,
         is_completed: bool,
         is_normal_dex: bool,
-        dev: address
+        dev: address,
+        last_buyer: Option<LastBuyer>
     }
 
     struct TokenPairRecord has key, store, copy {
@@ -88,7 +86,7 @@ module pump::pump_fa {
     }
 
     // struct to track the last buyer
-    struct LastBuyer has key, drop {
+    struct LastBuyer has store, copy, drop {
         buyer: address,
         timestamp: u64,
         token_amount: u64
@@ -169,7 +167,13 @@ module pump::pump_fa {
         );
         let reserve_diff = token_reserves - token_amount;
         assert!(reserve_diff > 0, ERROR_INSUFFICIENT_LIQUIDITY);
-        ((move_reserves * token_reserves) / reserve_diff) - move_reserves
+        let div_part1 = ((move_reserves * token_reserves) / reserve_diff);
+        let div_part2 = ((move_reserves * token_reserves * 100) / reserve_diff);
+        if (div_part1 * 100 < div_part2) {
+            div_part1 = div_part1 + 1;
+        };
+
+        div_part1 - move_reserves
     }
 
     /*
@@ -188,8 +192,15 @@ module pump::pump_fa {
             ERROR_INSUFFICIENT_LIQUIDITY
         );
 
-        move_reserves - ((token_reserves * move_reserves) / (token_value
-            + token_reserves))
+        let div_part1 = (token_reserves * move_reserves) / (token_value
+            + token_reserves);
+        let div_part2 = (token_reserves * move_reserves * 100)
+            / (token_value + token_reserves);
+        if (div_part1 * 100 < div_part2) {
+            div_part1 = div_part1 + 1;
+        };
+
+        move_reserves - div_part1
     }
 
     /*
@@ -207,8 +218,15 @@ module pump::pump_fa {
             token_reserves > 0 && move_reserves > 0 && move_value > 0,
             ERROR_INSUFFICIENT_LIQUIDITY
         );
-        token_reserves - ((token_reserves * move_reserves) / (move_value
-            + move_reserves))
+
+        let div_part1 = (token_reserves * move_reserves) / (move_value + move_reserves);
+        let div_part2 = (token_reserves * move_reserves * 100) / (
+            move_value + move_reserves
+        );
+        if (div_part1 * 100 < div_part2) {
+            div_part1 = div_part1 + 1;
+        };
+        token_reserves - div_part1
     }
 
     /*
@@ -255,7 +273,6 @@ module pump::pump_fa {
 
         let (resource_account, signer_cap) =
             account::create_resource_account(pump_admin, b"pump");
-        // let resource_addr = signer::address_of(&resource_account);
         move_to(
             pump_admin,
             Handle {
@@ -275,9 +292,10 @@ module pump::pump_fa {
                 initial_virtual_move_reserves: 30 * DECIMALS,
                 token_decimals: 8,
                 dex_transfer_threshold: 3 * DECIMALS,
-                wait_duration: 28800, // 8 hours = 28800 seconds
+                wait_duration: 3600, // 1 hours = 3600 seconds
                 min_move_amount: 100_000_000, // Minimum purchase amount = 100_000_000 (1 MOVE)
-                high_fee: 1000 // High fee rate period fee = 1000 (10%)
+                high_fee: 1000, // High fee rate period fee = 1000 (10%)
+                deadline: 10800 // 3 hours
             }
         );
 
@@ -289,6 +307,7 @@ module pump::pump_fa {
             real_move_reserves: simple_map::create()
         };
         move_to(&resource_account, pool_record);
+        coin::register<AptosCoin>(&resource_account);
     }
 
     #[view]
@@ -299,8 +318,7 @@ module pump::pump_fa {
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
 
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
@@ -317,7 +335,7 @@ module pump::pump_fa {
                 (pool.virtual_move_reserves as u256),
                 (pool.virtual_token_reserves as u256),
                 (token_amount as u256)
-            ) + 1;
+            );
 
         (liquidity_cost as u64)
     }
@@ -329,8 +347,7 @@ module pump::pump_fa {
         let token_addr =
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
@@ -357,8 +374,7 @@ module pump::pump_fa {
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
 
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
@@ -384,9 +400,7 @@ module pump::pump_fa {
         let token_addr =
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
@@ -411,9 +425,7 @@ module pump::pump_fa {
         let token_addr =
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
@@ -463,9 +475,7 @@ module pump::pump_fa {
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
 
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
@@ -523,37 +533,50 @@ module pump::pump_fa {
 
     // Get last buyer information
     #[view]
-    public fun get_last_buyer(): (address, u64, u64) acquires PumpConfig, LastBuyer {
+    public fun get_last_buyer(
+        token_in_name: String,
+        token_in_symbol: String
+    ): (address, u64, u64) acquires PumpConfig, PoolRecord {
+        let token_addr = Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-
-        assert!(exists<LastBuyer>(resource_addr), ERROR_NO_LAST_BUYER);
-        let last_buyer = borrow_global<LastBuyer>(resource_addr);
-
-        (last_buyer.buyer, last_buyer.timestamp + config.wait_duration, last_buyer.token_amount)
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
+        
+        let pool_record = borrow_global<PoolRecord>(resource_addr);
+        let token_pair_record = simple_map::borrow(&pool_record.records, &token_addr);
+        let pool = token_pair_record.pool;
+        
+        if (option::is_none(&pool.last_buyer)) {
+            return (@0x0, 0, 0)
+        };
+        
+        let last_buyer = option::borrow(&pool.last_buyer);
+        (
+            last_buyer.buyer,
+            last_buyer.timestamp + config.wait_duration,
+            last_buyer.token_amount
+        )
     }
 
     // Get current pump stage
     #[view]
     public fun get_pump_stage(
-        token_in_name: String, token_in_symbol: String
-    ): u8 acquires PumpConfig, PoolRecord, LastBuyer {
+        token_in_name: String,
+        token_in_symbol: String
+    ): u8 acquires PumpConfig, PoolRecord {
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-
-        let token_addr =
-            Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
-
-        assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
-
-        let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
-        let real_move_reserves =
-            simple_map::borrow<address, Coin<AptosCoin>>(
-                &mut pool_record.real_move_reserves, &token_addr
-            );
-
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
+        let token_addr = Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
+        
+        let pool_record = borrow_global<PoolRecord>(resource_addr);
+        let token_pair_record = simple_map::borrow(&pool_record.records, &token_addr);
+        let pool = token_pair_record.pool;
+        
+        // Stage 4: Pool completed
+        if (pool.is_completed) {
+            return 4
+        };
+        
+        let real_move_reserves = simple_map::borrow(&pool_record.real_move_reserves, &token_addr);
         let current_move_balance = coin::value<AptosCoin>(real_move_reserves);
 
         // Stage 1: Before reaching threshold
@@ -562,8 +585,8 @@ module pump::pump_fa {
         };
 
         // Stage 2: After threshold but before wait duration
-        if (exists<LastBuyer>(resource_addr)) {
-            let last_buyer = borrow_global<LastBuyer>(resource_addr);
+        if (option::is_some(&pool.last_buyer)) {
+            let last_buyer = option::borrow(&pool.last_buyer);
             let current_time = timestamp::now_seconds();
 
             if (current_time < last_buyer.timestamp + config.wait_duration) {
@@ -581,7 +604,7 @@ module pump::pump_fa {
     /*
     Deploy a new MEME token and create its pool
     */
-    entry public fun deploy(
+    public entry fun deploy(
         caller: &signer,
         description: String,
         name: String,
@@ -601,9 +624,8 @@ module pump::pump_fa {
         assert!(!(string::length(&twitter) > 100), ERROR_INVALID_LENGTH);
 
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-        assert!(!exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
+        assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
         let sender = address_of(caller);
 
         Liquid_Staking_Token::create_fa(
@@ -618,12 +640,12 @@ module pump::pump_fa {
 
         // Create and initialize pool
         let pool = Pool {
-            real_token_reserves: config.initial_virtual_token_reserves,
             virtual_token_reserves: config.initial_virtual_token_reserves,
             virtual_move_reserves: config.initial_virtual_move_reserves,
             is_completed: false,
             is_normal_dex: false,
-            dev: sender
+            dev: sender,
+            last_buyer: option::none()
         };
 
         let token_pair_record = TokenPairRecord {
@@ -694,7 +716,7 @@ module pump::pump_fa {
         token_in_name: String,
         token_in_symbol: String,
         buy_token_amount: u64
-    ) acquires PumpConfig, PoolRecord, Handle, LastBuyer {
+    ) acquires PumpConfig, PoolRecord, Handle {
         assert!(buy_token_amount > 0, ERROR_PUMP_AMOUNT_IS_NULL);
         let token_addr =
             Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
@@ -711,7 +733,7 @@ module pump::pump_fa {
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
         let token_pair_record =
-            simple_map::borrow<address, TokenPairRecord>(
+            simple_map::borrow_mut<address, TokenPairRecord>(
                 &mut pool_record.records, &token_addr
             );
         let pool = token_pair_record.pool;
@@ -724,62 +746,58 @@ module pump::pump_fa {
             );
         let current_move_balance = coin::value(real_move_reserves);
 
-        // Check the minimum purchase amount
-        assert!(buy_token_amount >= config.min_move_amount, ERROR_AMOUNT_TOO_LOW);
-        let token_amount = math64::min(buy_token_amount, pool.real_token_reserves);
-
         // Check if the high fee period has started
         if (current_move_balance >= config.dex_transfer_threshold) {
             // Check if the wait duration has passed since the last buy
-            if (exists<LastBuyer>(resource_addr)) {
-                let last_buyer = borrow_global<LastBuyer>(resource_addr);
+            if (option::is_some(&pool.last_buyer)) {
+                let last_buyer = option::borrow(&pool.last_buyer);
                 let current_time = timestamp::now_seconds();
-                assert!(current_time - last_buyer.timestamp < config.wait_duration, ERROR_WAIT_DURATION_PASSED);
+                assert!(
+                    current_time - last_buyer.timestamp < config.wait_duration,
+                    ERROR_WAIT_DURATION_PASSED
+                );
             };
 
-            let liquidity_cost = calculate_add_liquidity_cost(
-                (pool.virtual_move_reserves as u256),
-                (pool.virtual_token_reserves as u256),
-                (buy_token_amount as u256)
-            ) + 1;
+            let liquidity_cost =
+                calculate_add_liquidity_cost(
+                    (pool.virtual_move_reserves as u256),
+                    (pool.virtual_token_reserves as u256),
+                    (buy_token_amount as u256)
+                );
 
             // Check the minimum purchase amount
-            assert!((liquidity_cost as u64) >= config.min_move_amount, ERROR_AMOUNT_TOO_LOW);
+            assert!(
+                (liquidity_cost as u64) >= config.min_move_amount, ERROR_AMOUNT_TOO_LOW
+            );
 
             // Use high fee (10%)
-            let platform_fee = math64::mul_div(
-                (liquidity_cost as u64),
-                config.high_fee, 
-                10000
-            );
+            let platform_fee =
+                math64::mul_div((liquidity_cost as u64), config.high_fee, 10000);
 
             let total_cost = (liquidity_cost as u64) + platform_fee;
             let total_move_coin = coin::withdraw<AptosCoin>(caller, total_cost);
             let platform_fee_coin = coin::extract(&mut total_move_coin, platform_fee);
 
             let move_in_amount = coin::value<AptosCoin>(&total_move_coin);
-            get_token_by_apt(&mut pool, move_in_amount, token_amount);
+            get_token_by_apt(&mut pool, move_in_amount, buy_token_amount);
             coin::merge<AptosCoin>(real_move_reserves, total_move_coin);
 
             // Update the last buyer information
-            if (exists<LastBuyer>(resource_addr)) {
-                let _last_buyer = move_from<LastBuyer>(resource_addr);
+            if (option::is_some(&pool.last_buyer)) {
+                let _last_buyer = option::borrow(&pool.last_buyer);
                 // Clean up previous records
             };
 
             // Record the new last buyer
-            move_to(
-                &resource,
-                LastBuyer {
-                    buyer: sender,
-                    timestamp: timestamp::now_seconds(),
-                    token_amount: token_amount
-                }
-            );
+            pool.last_buyer = option::some(LastBuyer {
+                buyer: sender,
+                timestamp: timestamp::now_seconds(),
+                token_amount: buy_token_amount
+            });
 
             Liquid_Staking_Token::mint(
                 sender,
-                token_amount,
+                buy_token_amount,
                 token_pair_record.name,
                 token_pair_record.symbol
             );
@@ -791,13 +809,14 @@ module pump::pump_fa {
                     move_amount: move_in_amount,
                     is_buy: true,
                     token_address: token_addr,
-                    token_amount,
+                    token_amount: buy_token_amount,
                     user: sender,
                     virtual_move_reserves: pool.virtual_move_reserves,
                     virtual_token_reserves: pool.virtual_token_reserves,
                     timestamp: timestamp::now_seconds()
                 }
             );
+            token_pair_record.pool = pool;
             return
         };
 
@@ -805,9 +824,12 @@ module pump::pump_fa {
             calculate_add_liquidity_cost(
                 (pool.virtual_move_reserves as u256),
                 (pool.virtual_token_reserves as u256),
-                (token_amount as u256)
-            ) + 1;
+                (buy_token_amount as u256)
+            );
 
+        // Check the minimum purchase amount
+        assert!((liquidity_cost as u64) >= 10000, ERROR_AMOUNT_TOO_LOW);
+        
         let platform_fee =
             math64::mul_div(
                 (liquidity_cost as u64),
@@ -820,14 +842,30 @@ module pump::pump_fa {
         let platform_fee_coin = coin::extract(&mut total_move_coin, platform_fee);
 
         let move_in_amount = coin::value<AptosCoin>(&total_move_coin);
-        get_token_by_apt(&mut pool, move_in_amount, token_amount);
+
+        // Check if this buy will trigger the high fee period
+        let will_trigger_high_fee = current_move_balance < config.dex_transfer_threshold && 
+            (current_move_balance + move_in_amount) >= config.dex_transfer_threshold;
+
+        // If this buy will trigger high fee period, record this buyer as LastBuyer
+        if (will_trigger_high_fee) {
+            if (option::is_some(&pool.last_buyer)) {
+                let _last_buyer = option::borrow(&pool.last_buyer);
+            };
+            pool.last_buyer = option::some(LastBuyer {
+                buyer: sender,
+                timestamp: timestamp::now_seconds(),
+                token_amount: buy_token_amount
+            });
+        };
+        
+        get_token_by_apt(&mut pool, move_in_amount, buy_token_amount);
+
         coin::merge<AptosCoin>(real_move_reserves, total_move_coin);
-        // let token_amount = coin::value(&received_token);
-        // let move_amount = coin::value(&remaining_move);
 
         Liquid_Staking_Token::mint(
             sender,
-            token_amount,
+            buy_token_amount,
             token_pair_record.name,
             token_pair_record.symbol
         );
@@ -839,13 +877,14 @@ module pump::pump_fa {
                 move_amount: total_cost,
                 is_buy: true,
                 token_address: token_addr,
-                token_amount,
+                token_amount: buy_token_amount,
                 user: sender,
                 virtual_move_reserves: pool.virtual_move_reserves,
                 virtual_token_reserves: pool.virtual_token_reserves,
                 timestamp: timestamp::now_seconds()
             }
         );
+        token_pair_record.pool = pool;
     }
 
     //Buy MEME tokens with MOVE with slippage limit
@@ -859,7 +898,7 @@ module pump::pump_fa {
         token_in_symbol: String,
         buy_token_amount: u64,
         max_price_impact: u64
-    ) acquires PumpConfig, PoolRecord, Handle, LastBuyer {
+    ) acquires PumpConfig, PoolRecord, Handle {
         let price_impact =
             get_price_impact(
                 token_in_name,
@@ -914,37 +953,41 @@ module pump::pump_fa {
         sell_token_amount: u64
     ) acquires PumpConfig, PoolRecord, Handle {
         assert!(sell_token_amount > 0, ERROR_PUMP_AMOUNT_IS_NULL);
-        
-        let token_addr = Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
+
+        let token_addr =
+            Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let sender = address_of(caller);
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-        
-        assert!(exists<Pool>(resource_addr), ERROR_PUMP_NOT_EXIST);
-        
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
+        assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
+
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
-        let token_pair_record = simple_map::borrow<address, TokenPairRecord>(
-            &mut pool_record.records, &token_addr
-        );
+        let token_pair_record =
+            simple_map::borrow<address, TokenPairRecord>(
+                &mut pool_record.records, &token_addr
+            );
         let pool = token_pair_record.pool;
-        
+
         assert!(!pool.is_completed, ERROR_PUMP_COMPLETED);
-        assert!(sell_token_amount <= pool.virtual_token_reserves, ERROR_INSUFFICIENT_LIQUIDITY);
-        
-        // // Add balance check
-        // let token_balance = Liquid_Staking_Token::balance(
-        //     sender,
-        //     token_pair_record.name,
-        //     token_pair_record.symbol
-        // );
-        // assert!(sell_token_amount <= token_balance, ERROR_INSUFFICIENT_BALANCE);
-        
-        let real_move_reserves = simple_map::borrow_mut<address, Coin<AptosCoin>>(
-            &mut pool_record.real_move_reserves, &token_addr
+        assert!(
+            sell_token_amount <= pool.virtual_token_reserves,
+            ERROR_INSUFFICIENT_LIQUIDITY
         );
+
+        // Add balance check
+        let token_balance = Liquid_Staking_Token::get_balance(
+            sender,
+            token_pair_record.name,
+            token_pair_record.symbol
+        );
+        assert!(sell_token_amount <= token_balance, ERROR_INSUFFICIENT_BALANCE);
+
+        let real_move_reserves =
+            simple_map::borrow_mut<address, Coin<AptosCoin>>(
+                &mut pool_record.real_move_reserves, &token_addr
+            );
         let current_move_balance = coin::value(real_move_reserves);
-        
+
         assert!(
             current_move_balance < config.dex_transfer_threshold,
             ERROR_NO_SELL_IN_HIGH_FEE_PERIOD
@@ -959,6 +1002,9 @@ module pump::pump_fa {
                     (sell_token_amount as u256)
                 ) as u64
             );
+
+        // Check the minimum purchase amount
+        assert!((liquidity_remove as u64) >= 10000, ERROR_AMOUNT_TOO_LOW);
 
         Liquid_Staking_Token::burn(
             sender,
@@ -1046,7 +1092,8 @@ module pump::pump_fa {
         new_dex_transfer_threshold: u64,
         new_high_fee: u64,
         new_wait_duration: u64,
-        new_min_move_amount: u64
+        new_min_move_amount: u64,
+        new_deadline: u64
     ) acquires PumpConfig {
         assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
         let config = borrow_global_mut<PumpConfig>(@pump);
@@ -1060,14 +1107,14 @@ module pump::pump_fa {
         config.high_fee = new_high_fee;
         config.wait_duration = new_wait_duration;
         config.min_move_amount = new_min_move_amount;
+        config.deadline = new_deadline;
     }
 
     //Update DEX transfer threshold
     //@param admin - Admin signer with permission to update threshold
     //@param new_threshold - New threshold value for DEX transfer
     public entry fun update_dex_threshold(
-        admin: &signer,
-        new_threshold: u64
+        admin: &signer, new_threshold: u64
     ) acquires PumpConfig {
         assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
         let config = borrow_global_mut<PumpConfig>(@pump);
@@ -1077,10 +1124,7 @@ module pump::pump_fa {
     //Update platform fee rate
     //@param admin - Admin signer with permission to update fee
     //@param new_fee - New platform fee rate (in basis points)
-    public entry fun update_platform_fee(
-        admin: &signer,
-        new_fee: u64
-    ) acquires PumpConfig {
+    public entry fun update_platform_fee(admin: &signer, new_fee: u64) acquires PumpConfig {
         assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
         let config = borrow_global_mut<PumpConfig>(@pump);
         config.platform_fee = new_fee;
@@ -1090,8 +1134,7 @@ module pump::pump_fa {
     //@param admin - Admin signer with permission to update address
     //@param new_address - New address to receive platform fees
     public entry fun update_platform_fee_address(
-        admin: &signer,
-        new_address: address
+        admin: &signer, new_address: address
     ) acquires PumpConfig {
         assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
         let config = borrow_global_mut<PumpConfig>(@pump);
@@ -1101,51 +1144,62 @@ module pump::pump_fa {
     // ========================================= Migration Part ========================================
     // Claim migration right
     public entry fun claim_migration_right(
+        caller: &signer,
         name: String,
         symbol: String
-    ) acquires PumpConfig, PoolRecord, Handle, LastBuyer {
+    ) acquires PumpConfig, PoolRecord, Handle {
         let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-        
-        assert!(exists<LastBuyer>(resource_addr), ERROR_NO_LAST_BUYER);
-        let last_buyer = borrow_global<LastBuyer>(resource_addr);
-        
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
+        assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
+        let token_addr = Liquid_Staking_Token::get_fa_obj_address(name, symbol);
+        let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
+        let token_pair_record = simple_map::borrow_mut<address, TokenPairRecord>(
+            &mut pool_record.records, &token_addr
+        );
+
+        assert!(option::is_some(&token_pair_record.pool.last_buyer), ERROR_NO_LAST_BUYER);
+        let last_buyer = option::borrow(&token_pair_record.pool.last_buyer);
+
         assert!(
             timestamp::now_seconds() >= last_buyer.timestamp + config.wait_duration,
             ERROR_WAIT_TIME_NOT_REACHED
         );
 
-        migrate_to_normal_dex(name, symbol);
+        let winner_address = last_buyer.buyer;
+        let real_move_reserves = simple_map::borrow_mut<address, Coin<AptosCoin>>(
+            &mut pool_record.real_move_reserves, &token_addr
+        );
+        migrate_to_razor_dex(
+            caller,
+            name,
+            symbol,
+            token_pair_record,
+            real_move_reserves,
+            winner_address
+        );
     }
 
-    // Transfer movefun to normal dex if there is no dex support
-    fun migrate_to_normal_dex(
-        name: String,
-        symbol: String
-    ) acquires PumpConfig, PoolRecord, Handle, LastBuyer {
-        let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-        // check pool exists
-        assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
-
+    /*
+    Migrates the pump pool to razor DEX
+    */
+    fun migrate_to_razor_dex(
+        caller: &signer,
+        name: String, 
+        symbol: String,
+        token_pair_record: &mut TokenPairRecord,
+        real_move_reserves: &mut Coin<AptosCoin>,
+        winner_address: address
+    ) acquires PumpConfig, Handle {
+        let sender = address_of(caller);
         let token_addr = Liquid_Staking_Token::get_fa_obj_address(name, symbol);
+        let config = borrow_global<PumpConfig>(@pump);
+        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
+        let resource_signer = account::create_signer_with_capability(&config.resource_cap);
 
-        let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
-        let token_pair_record =
-            simple_map::borrow<address, TokenPairRecord>(
-                &mut pool_record.records, &token_addr
-            );
         let pool = token_pair_record.pool;
 
         // check pool is not completed
         assert!(!pool.is_completed, ERROR_PUMP_COMPLETED);
-
-        let real_move_reserves =
-            simple_map::borrow_mut<address, Coin<AptosCoin>>(
-                &mut pool_record.real_move_reserves, &token_addr
-            );
 
         let real_move_amount = coin::value<AptosCoin>(real_move_reserves);
 
@@ -1155,22 +1209,18 @@ module pump::pump_fa {
             ERROR_INSUFFICIENT_LIQUIDITY
         );
 
-        let virtual_price =
-            (pool.virtual_move_reserves as u256) * 100_000_000
+        let virtual_price = 
+            (pool.virtual_move_reserves as u256) * 100_000_000 
                 / (pool.virtual_token_reserves as u256);
 
         let required_token = (((real_move_amount as u256) * 100_000_000 / virtual_price) as u64);
-        let burned_amount = pool.real_token_reserves - required_token;
-        // let sender = address_of(caller);
+        let burned_amount = pool.virtual_token_reserves - required_token;
         pool.is_completed = true;
-        pool.is_normal_dex = true;
 
-        // Calculate reward for caller (10% of the token amount)
-        let reward_amount = pool.real_token_reserves / 10;
+        // Calculate reward for winner (10% of the token amount)
+        let reward_amount = pool.virtual_token_reserves / 10;
 
-        let last_buyer = borrow_global<LastBuyer>(resource_addr);
-        let winner_address = last_buyer.buyer;
-
+        // Send reward to winner
         Liquid_Staking_Token::mint(
             winner_address,
             reward_amount,
@@ -1185,183 +1235,259 @@ module pump::pump_fa {
         // Store gas fee in resource account
         coin::deposit(resource_addr, gas_coin);
 
-        // Reset pool state
-        pool.virtual_move_reserves = real_move_amount - gas_amount;
-        pool.virtual_token_reserves = required_token;
+        // Store tokens in resource account
+        let real_move_amount = coin::value<AptosCoin>(real_move_reserves);
+        let real_move = coin::extract<AptosCoin>(real_move_reserves, real_move_amount);
+        coin::deposit<AptosCoin>(resource_addr, real_move);
 
-        pool.real_token_reserves = required_token;
+        // should mint required_token to dex
+        Liquid_Staking_Token::mint(
+            resource_addr,
+            required_token,
+            token_pair_record.name,
+            token_pair_record.symbol
+        );
 
-        // Emit reset event
+        router::add_liquidity_move(
+            &resource_signer,
+            // token: address,
+            token_addr,
+            // amount_token_desired: u64,
+            required_token,
+            // amount_token_min: u64,
+            0,
+            // amount_move_desired: u64,
+            real_move_amount,  // Removed gas_amount subtraction
+            // amount_move_min: u64,
+            0,
+            // to: address,
+            resource_addr,
+            // deadline: u64,
+            timestamp::now_seconds() + config.deadline
+        );
+
+        // Emit transfer event
         event::emit_event(
             &mut borrow_global_mut<Handle>(@pump).transfer_events,
             TransferEvent {
-                move_amount: real_move_amount - gas_amount,
+                move_amount: real_move_amount,
                 token_address: token_addr,
                 token_amount: required_token,
-                user: winner_address, 
+                user: sender,
                 virtual_move_reserves: pool.virtual_move_reserves,
                 virtual_token_reserves: pool.virtual_token_reserves,
                 burned_amount
             }
         );
+        token_pair_record.pool = pool;
     }
 
-    // if there is no dex support, use normal buy
-    public entry fun normal_buy(
-        caller: &signer,
-        buy_token_amount: u64,
-        token_in_name: String,
-        token_in_symbol: String
-    ) acquires PumpConfig, PoolRecord, Handle {
-        assert!(buy_token_amount > 0, ERROR_PUMP_AMOUNT_IS_NULL);
-        let token_addr =
-            Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
-        let sender = address_of(caller);
-        let config = borrow_global<PumpConfig>(@pump);
+    #[test_only]
+    use aptos_framework::aptos_coin;
 
-        if (!coin::is_account_registered<AptosCoin>(sender)) {
-            coin::register<AptosCoin>(caller);
-        };
+    #[test_only]
+    const ONE_APT: u64 = 100000000; // 1x10**8
 
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
+    #[test_only]
+    public fun create_test_accounts(
+        deployer: &signer, user_1: &signer, user_2: &signer
+    ) {
+        account::create_account_for_test(address_of(user_1));
+        account::create_account_for_test(address_of(user_2));
+        account::create_account_for_test(address_of(deployer));
+        coin::register<AptosCoin>(user_1);
+        coin::register<AptosCoin>(user_2);
+        coin::register<AptosCoin>(deployer);
+    }
 
-        let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
-        let token_pair_record =
-            simple_map::borrow<address, TokenPairRecord>(
-                &mut pool_record.records, &token_addr
-            );
-        let pool = token_pair_record.pool;
-        assert!(pool.is_completed, ERROR_PUMP_NOT_COMPLETED);
-        assert!(pool.is_normal_dex, ERROR_NOT_NORMAL_DEX);
+    #[test_only]
+    public fun test_init_only(creator: &signer) {
+        init_module(creator);
+    }
 
-        let real_move_reserves =
-            simple_map::borrow_mut<address, Coin<AptosCoin>>(
-                &mut pool_record.real_move_reserves, &token_addr
-            );
+    #[test(
+        aptos_framework = @0x1, sender = @pump, user1 = @0x123, user2 = @0x1234
+    )]
+    public fun test_buy(
+        aptos_framework: &signer,
+        sender: &signer,
+        user1: &signer,
+        user2: &signer
+    ) acquires PumpConfig, Handle, TokenList, PoolRecord {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
+        create_test_accounts(sender, user1, user2);
 
-        let liquidity_cost =
-            calculate_add_liquidity_cost(
-                (pool.virtual_move_reserves as u256),
-                (pool.virtual_token_reserves as u256),
-                (buy_token_amount as u256)
-            ) + 1;
+        test_init_only(sender);
+        Liquid_Staking_Token::test_init_only(sender);
 
-        let platform_fee =
-            math64::mul_div(
-                (liquidity_cost as u64),
-                config.platform_fee,
-                10000
-            );
+        aptos_coin::mint(aptos_framework, address_of(user1), 200 * ONE_APT);
+        aptos_coin::mint(aptos_framework, address_of(user2), 200 * ONE_APT);
+        timestamp::set_time_has_started_for_testing(aptos_framework);
 
-        let total_cost = (liquidity_cost as u64) + platform_fee;
-        let total_move_coin = coin::withdraw<AptosCoin>(caller, total_cost);
-        let platform_fee_coin = coin::extract(&mut total_move_coin, platform_fee);
-
-        let move_in_amount = coin::value<AptosCoin>(&total_move_coin);
-        get_token_by_apt(&mut pool, move_in_amount, buy_token_amount);
-        coin::merge<AptosCoin>(real_move_reserves, total_move_coin);
-
-        Liquid_Staking_Token::mint(
+        deploy(
             sender,
-            buy_token_amount,
-            token_pair_record.name,
-            token_pair_record.symbol
+            string::utf8(b"meme"),
+            string::utf8(b"meme"),
+            string::utf8(b"meme"),
+            string::utf8(b"http://example.com/favicon.ico"),
+            string::utf8(b"http://example.com"),
+            string::utf8(b"http://telegram.com"),
+            string::utf8(b"http://twitter.com")
         );
-        coin::deposit(config.platform_fee_address, platform_fee_coin);
-
-        event::emit_event(
-            &mut borrow_global_mut<Handle>(@pump).trade_events,
-            TradeEvent {
-                move_amount: total_cost,
-                is_buy: true,
-                token_address: token_addr,
-                token_amount: buy_token_amount,
-                user: sender,
-                virtual_move_reserves: pool.virtual_move_reserves,
-                virtual_token_reserves: pool.virtual_token_reserves,
-                timestamp: timestamp::now_seconds()
-            }
+        buy(
+            user1, // caller: &signer,
+            string::utf8(b"meme"), // token_in_name: String,
+            string::utf8(b"meme"), // token_in_symbol: String,
+            4_000_000 * DECIMALS // buy_token_amount: u64
         );
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
     }
 
-    // if there is no dex support, use normal sell
-    public entry fun normal_sell(
-        caller: &signer,
-        sell_token_amount: u64,
-        token_in_name: String,
-        token_in_symbol: String
-    ) acquires PumpConfig, PoolRecord, Handle {
-        let token_addr =
-            Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
-        let config = borrow_global<PumpConfig>(@pump);
-        let resource = account::create_signer_with_capability(&config.resource_cap);
-        let resource_addr = address_of(&resource);
-        let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
-        let token_pair_record =
-            simple_map::borrow<address, TokenPairRecord>(
-                &mut pool_record.records, &token_addr
-            );
-        let pool = token_pair_record.pool;
+    #[test(
+        aptos_framework = @0x1, sender = @pump, user1 = @0x123, user2 = @0x1234
+    )]
+    public fun test_sell(
+        aptos_framework: &signer,
+        sender: &signer,
+        user1: &signer,
+        user2: &signer
+    ) acquires PumpConfig, Handle, TokenList, PoolRecord {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
+        create_test_accounts(sender, user1, user2);
 
-        let real_move_reserves =
-            simple_map::borrow_mut<address, Coin<AptosCoin>>(
-                &mut pool_record.real_move_reserves, &token_addr
-            );
+        test_init_only(sender);
+        Liquid_Staking_Token::test_init_only(sender);
 
-        let sender = address_of(caller);
+        aptos_coin::mint(aptos_framework, address_of(user1), 200 * ONE_APT);
+        aptos_coin::mint(aptos_framework, address_of(user2), 200 * ONE_APT);
+        timestamp::set_time_has_started_for_testing(aptos_framework);
 
-        assert!(sell_token_amount > 0, ERROR_PUMP_AMOUNT_IS_NULL);
-        assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
-        assert!(pool.is_completed, ERROR_PUMP_NOT_COMPLETED);
-        assert!(pool.is_normal_dex, ERROR_NOT_NORMAL_DEX);
+        deploy(
+            sender,
+            string::utf8(b"meme"),
+            string::utf8(b"meme"),
+            string::utf8(b"meme"),
+            string::utf8(b"http://example.com/favicon.ico"),
+            string::utf8(b"http://example.com"),
+            string::utf8(b"http://telegram.com"),
+            string::utf8(b"http://twitter.com")
+        );
+        buy(
+            user1, // caller: &signer,
+            string::utf8(b"meme"), // token_in_name: String,
+            string::utf8(b"meme"), // token_in_symbol: String,
+            5_000_000 * DECIMALS // buy_token_amount: u64  -- cost 1.5 APT
+        );
+
+        let user1_meme_balance = Liquid_Staking_Token::get_balance(address_of(user1), string::utf8(b"meme"), string::utf8(b"meme"));
         assert!(
-            sell_token_amount <= pool.virtual_token_reserves,
-            ERROR_INSUFFICIENT_LIQUIDITY
+            user1_meme_balance == (5_000_000 * DECIMALS),
+            2
+        ); // 5_000_000 * DECIMALS meme coin
+
+
+        let user1_balance = coin::balance<AptosCoin>(address_of(user1));
+        assert!(user1_balance == 19841315790, user1_balance);
+
+        sell(
+            // caller: &signer,
+            user1,
+            // token_in_name: String,
+            string::utf8(b"meme"),
+            // token_in_symbol: String,
+            string::utf8(b"meme"),
+            // sell_token_amount: u64
+            4_000_000 * DECIMALS //  -- get 1.2 APT
         );
 
-        // Check if the seller has enough token balance
-        let seller_token_balance = coin::balance<AptosCoin>(sender);
-        assert!(sell_token_amount <= seller_token_balance, ERROR_INSUFFICIENT_BALANCE);
+        let user1_balance = coin::balance<AptosCoin>(address_of(user1));
+        assert!(user1_balance == 19968269538, user1_balance);
 
-        let liquidity_remove =
-            calculate_sell_token(
-                (pool.virtual_token_reserves as u256),
-                (pool.virtual_move_reserves as u256),
-                (sell_token_amount as u256)
-            );
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+    }
 
-        Liquid_Staking_Token::burn(
+    #[test(
+        aptos_framework = @0x1, sender = @pump, user1 = @0x123, user2 = @0x1234
+    )]
+    public fun test_migrate_to_dex(
+        aptos_framework: &signer,
+        sender: &signer,
+        user1: &signer,
+        user2: &signer
+    ) acquires PumpConfig, Handle, TokenList, PoolRecord {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(aptos_framework);
+        create_test_accounts(sender, user1, user2);
+
+        test_init_only(sender);
+        Liquid_Staking_Token::test_init_only(sender);
+
+        aptos_coin::mint(aptos_framework, address_of(user1), 200 * ONE_APT);
+        aptos_coin::mint(aptos_framework, address_of(user2), 200 * ONE_APT);
+        timestamp::set_time_has_started_for_testing(aptos_framework);
+
+        deploy(
             sender,
-            sell_token_amount,
-            token_pair_record.name,
-            token_pair_record.symbol
+            string::utf8(b"meme"),
+            string::utf8(b"meme"),
+            string::utf8(b"meme"),
+            string::utf8(b"http://example.com/favicon.ico"),
+            string::utf8(b"http://example.com"),
+            string::utf8(b"http://telegram.com"),
+            string::utf8(b"http://twitter.com")
         );
 
-        // Execute swap
-        get_apt_by_token(&mut pool, sell_token_amount, (liquidity_remove as u64));
-
-        let platform_fee =
-            math64::mul_div((liquidity_remove as u64), config.platform_fee, 10000);
-        let move_to_user =
-            coin::extract<AptosCoin>(real_move_reserves, (liquidity_remove as u64));
-        let move_amount = coin::value<AptosCoin>(&move_to_user);
-        let platform_fee_coin = coin::extract<AptosCoin>(&mut move_to_user, platform_fee);
-
-        coin::deposit(config.platform_fee_address, platform_fee_coin);
-        coin::deposit(sender, move_to_user);
-        event::emit_event(
-            &mut borrow_global_mut<Handle>(@pump).trade_events,
-            TradeEvent {
-                move_amount,
-                is_buy: false,
-                token_address: token_addr,
-                token_amount: sell_token_amount,
-                user: sender,
-                virtual_move_reserves: pool.virtual_move_reserves,
-                virtual_token_reserves: pool.virtual_token_reserves,
-                timestamp: timestamp::now_seconds()
-            }
+        // --------------------------------------
+        buy(
+            user1, // caller: &signer,
+            string::utf8(b"meme"), // token_in_name: String,
+            string::utf8(b"meme"), // token_in_symbol: String,
+            5_000_000 * DECIMALS // buy_token_amount: u64  -- cost 1.5 APT
         );
+
+        let user1_meme_balance = Liquid_Staking_Token::get_balance(address_of(user1), string::utf8(b"meme"), string::utf8(b"meme"));
+        assert!(
+            user1_meme_balance == (5_000_000 * DECIMALS),
+            2
+        ); // 5_000_000 * DECIMALS meme coin
+
+
+        // --------------------------------------
+        buy(
+            user2, // caller: &signer,
+            string::utf8(b"meme"), // token_in_name: String,
+            string::utf8(b"meme"), // token_in_symbol: String,
+            5_000_000 * DECIMALS // buy_token_amount: u64  -- cost 1.5 APT
+        );
+        buy(
+            user1, // caller: &signer,
+            string::utf8(b"meme"), // token_in_name: String,
+            string::utf8(b"meme"), // token_in_symbol: String,
+            5_000_000 * DECIMALS // buy_token_amount: u64  -- cost 1.5 APT
+        );        
+
+        let user1_meme_balance = Liquid_Staking_Token::get_balance(address_of(user1), string::utf8(b"meme"), string::utf8(b"meme"));
+        assert!(
+            user1_meme_balance == (10_000_000 * DECIMALS),
+            user1_meme_balance
+        );
+
+        // --------------------------------------
+        // enter high fee period, but pool.virtual_token_reserves > 20_000_000 * DECIMALS
+        buy(
+            user2, // caller: &signer,
+            string::utf8(b"meme"), // token_in_name: String,
+            string::utf8(b"meme"), // token_in_symbol: String,
+            4_000_000 * DECIMALS // buy_token_amount: u64  -- cost 1.2 APT
+        );
+        let user2_meme_balance = Liquid_Staking_Token::get_balance(address_of(user2), string::utf8(b"meme"), string::utf8(b"meme"));
+        assert!(
+            user2_meme_balance == (9_000_000 * DECIMALS),
+            user2_meme_balance
+        );
+
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
     }
 }

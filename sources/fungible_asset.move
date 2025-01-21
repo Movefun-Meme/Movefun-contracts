@@ -185,6 +185,11 @@ module pump::Liquid_Staking_Token {
     }
 
     #[test_only]
+    public fun test_init_only(creator: &signer) {
+        init_module(creator);
+    }
+
+    #[test_only]
     public fun create_token_test(
         sender: &signer,
         name: String,
@@ -196,7 +201,7 @@ module pump::Liquid_Staking_Token {
     ): Object<Metadata> acquires LST, ManagedFungibleAsset {
         create_fa(name, symbol, decimals, icon_uri, project_uri);
         mint(
-            signer::address_of(sender),
+            std::signer::address_of(sender),
             initial_supply,
             name,
             symbol
@@ -209,9 +214,9 @@ module pump::Liquid_Staking_Token {
     public fun test_flow(
         sender: signer, user1: signer, user2: signer
     ) acquires LST, ManagedFungibleAsset {
-        let sender_addr = signer::address_of(&sender);
-        let user1_addr = signer::address_of(&user1);
-        let user2_addr = signer::address_of(&user2);
+        let sender_addr = std::signer::address_of(&sender);
+        let user1_addr = std::signer::address_of(&user1);
+        let user2_addr = std::signer::address_of(&user2);
         init_module(&sender);
         let usdt_name = string::utf8(b"USD Tether");
         let usdt_symbol = string::utf8(b"USDT");
