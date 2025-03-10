@@ -1,4 +1,4 @@
-module razor_amm::pair {
+module razor_amm::amm_pair {
   use std::bcs;
   use std::option;
   use std::signer;
@@ -12,14 +12,15 @@ module razor_amm::pair {
   use aptos_framework::primary_fungible_store;
   use aptos_framework::timestamp;
 
-  use aptos_std::comparator;
+  use razor_amm::amm_controller;
 
-  use razor_amm::controller;
-  use razor_amm::math;
-  use razor_amm::uq64x64;
+  use razor_libs::math;
+  use razor_libs::fixedpoint64;
+  use razor_libs::sort;
+  use razor_libs::token_utils;
 
-  friend razor_amm::factory;
-  friend razor_amm::router;
+  friend razor_amm::amm_factory;
+  friend razor_amm::amm_router;
 
   const MINIMUM_LIQUIDITY: u64 = 1000;
   const LP_TOKEN_DECIMALS: u8 = 8;
@@ -184,7 +185,7 @@ module razor_amm::pair {
     token0: Object<Metadata>,
     token1: Object<Metadata>,
   ): Object<Pair> {
-    if (!is_sorted(token0, token1)) {
+    if (!sort::is_sorted_two(token0, token1)) {
       return initialize(token1, token0)
     };
 
@@ -214,7 +215,7 @@ module razor_amm::pair {
     let token0 = fungible_asset::store_metadata(pair.token0);
     let token1 = fungible_asset::store_metadata(pair.token1);
 
-    if (is_sorted(token0, token1)) {
+    if (sort::is_sorted_two(token0, token1)) {
       (token0, token1)
     } else {
       (token1, token0)
@@ -233,10 +234,10 @@ module razor_amm::pair {
     let time_elapsed = ((now - lp.block_timestamp_last) as u128);
     if (time_elapsed > 0 && reserve0 != 0 && reserve1 != 0) {
       // allow overflow u128
-      let price_0_cumulative_last_delta = uq64x64::to_u128(uq64x64::fraction(reserve1, reserve0)) * time_elapsed;
+      let price_0_cumulative_last_delta = fixedpoint64::to_u128(fixedpoint64::fraction(reserve1, reserve0)) * time_elapsed;
       lp.price_0_cumulative_last = math::overflow_add(lp.price_0_cumulative_last, price_0_cumulative_last_delta);
 
-      let price_1_cumulative_last_delta = uq64x64::to_u128(uq64x64::fraction(reserve0, reserve1)) * time_elapsed;
+      let price_1_cumulative_last_delta = fixedpoint64::to_u128(fixedpoint64::fraction(reserve0, reserve1)) * time_elapsed;
       lp.price_1_cumulative_last = math::overflow_add(lp.price_1_cumulative_last, price_1_cumulative_last_delta);
     };
     lp.block_timestamp_last = now;
@@ -267,8 +268,8 @@ module razor_amm::pair {
   ): bool acquires Pair {
     let lp_address = object::object_address(&pair);
     let lp = pair_data_mut(&pair);
-    let fee_on = controller::get_fee_on();
-    let fee_to = controller::get_fee_to();
+    let fee_on = amm_controller::get_fee_on();
+    let fee_to = amm_controller::get_fee_to();
     let k_last = lp.k_last;
     if (fee_on) {
       if (k_last != 0) {
@@ -320,7 +321,7 @@ module razor_amm::pair {
     amount: u64,
   ) acquires Pair {
     let pair_data = pair_data(&pair);
-    let acc_store = ensure_account_token_store(to, pair);
+    let acc_store = token_utils::ensure_account_token_store(to, pair);
     let mint_ref = &pair_data.lp_token_refs.mint_ref;
     let transfer_ref = &pair_data.lp_token_refs.transfer_ref;
     let lp_coins = fungible_asset::mint(mint_ref, amount);
@@ -338,14 +339,14 @@ module razor_amm::pair {
     let sender_address = signer::address_of(sender);
     let token0 = fungible_asset::metadata_from_asset(&fungible_token0);
     let token1 = fungible_asset::metadata_from_asset(&fungible_token1);
-    if (!is_sorted(token0, token1)) {
+    if (!sort::is_sorted_two(token0, token1)) {
       return mint(sender, fungible_token1, fungible_token0, to)
     };
 
     let pool = liquidity_pool(token0, token1);
     assert_locked(pool);
-    controller::assert_unpaused();
-    let acc_store = ensure_account_token_store(to, pool);
+    amm_controller::assert_unpaused();
+    let acc_store = token_utils::ensure_account_token_store(to, pool);
 
     let amount0 = fungible_asset::amount(&fungible_token0);
     let amount1 = fungible_asset::amount(&fungible_token1);
@@ -403,10 +404,10 @@ module razor_amm::pair {
     amount: u64,
   ): (FungibleAsset, FungibleAsset) acquires Pair {
     assert_locked(pair);
-    controller::assert_unpaused();
+    amm_controller::assert_unpaused();
     assert!(amount > 0, ERROR_ZERO_AMOUNT);
     let sender_addr = signer::address_of(sender);
-    let store = ensure_account_token_store(sender_addr, pair);
+    let store = token_utils::ensure_account_token_store(sender_addr, pair);
 
     // feeOn
     let fee_on = mint_fee(pair);
@@ -423,7 +424,9 @@ module razor_amm::pair {
     let amount1 = ((amount as u128) * (reserve1 as u128) / total_supply as u64);
     assert!(amount0 > 0 && amount1 > 0, ERROR_INSUFFICIENT_LIQUIDITY_BURN);
 
-    let swap_signer = &controller::get_signer();
+    let swap_signer = &amm_controller::get_signer();
+
+    fungible_asset::burn_from(&lp.lp_token_refs.burn_ref, store, amount);
 
     let redeemed0 = dispatchable_fungible_asset::withdraw(swap_signer, store0, amount0);
     let redeemed1 = dispatchable_fungible_asset::withdraw(swap_signer, store1, amount1);
@@ -431,8 +434,6 @@ module razor_amm::pair {
     let balance0 = fungible_asset::balance(store0); 
     let balance1 = fungible_asset::balance(store1);
     
-    fungible_asset::burn_from(&lp.lp_token_refs.burn_ref, store, amount);
-
     // update interval
     update(lp, balance0, balance1, reserve0, reserve1);
     // feeOn
@@ -449,7 +450,7 @@ module razor_amm::pair {
       lp_amount: amount,
     });
     
-    if (is_sorted(fungible_asset::store_metadata(lp.token0), fungible_asset::store_metadata(lp.token1))) {
+    if (sort::is_sorted_two(fungible_asset::store_metadata(lp.token0), fungible_asset::store_metadata(lp.token1))) {
       (redeemed0, redeemed1)
     } else {
       (redeemed1, redeemed0)
@@ -466,7 +467,7 @@ module razor_amm::pair {
     to: address,
   ): (FungibleAsset, FungibleAsset) acquires Pair {
     assert_locked(pair);
-    controller::assert_unpaused();
+    amm_controller::assert_unpaused();
 
     let amount0_in = fungible_asset::amount(&token0_in);
     let amount1_in = fungible_asset::amount(&token1_in);
@@ -479,7 +480,7 @@ module razor_amm::pair {
     let reserve0 = fungible_asset::balance(store0);
     let reserve1 = fungible_asset::balance(store1);
 
-    let swap_signer = &controller::get_signer();
+    let swap_signer = &amm_controller::get_signer();
 
     dispatchable_fungible_asset::deposit(store0, token0_in);
     dispatchable_fungible_asset::deposit(store1, token1_in);
@@ -554,21 +555,12 @@ module razor_amm::pair {
     token0: Object<Metadata>,
     token1: Object<Metadata>
   ): address {
-    if (!is_sorted(token0, token1)) {
+    if (!sort::is_sorted_two(token0, token1)) {
       return liquidity_pool_address(token1, token0)
     };
 
     let seed = get_pair_seed(token0, token1);
-    object::create_object_address(&controller::get_signer_address(), seed)
-  }
-
-  fun ensure_account_token_store<T: key>(
-    account: address, 
-    pair: Object<T>
-  ): Object<FungibleStore> {
-    primary_fungible_store::ensure_primary_store_exists(account, pair);
-    let store = primary_fungible_store::primary_store(account, pair);
-    store
+    object::create_object_address(&amm_controller::get_signer_address(), seed)
   }
 
   public inline fun pair_data<T: key>(pair: &Object<T>): &Pair acquires Pair {
@@ -585,7 +577,7 @@ module razor_amm::pair {
   ): &ConstructorRef {
     let token_name = lp_token_name(token0, token1);
     let seed = get_pair_seed(token0, token1);
-    let lp_token_constructor_ref = &object::create_named_object(&controller::get_signer(), seed);
+    let lp_token_constructor_ref = &object::create_named_object(&amm_controller::get_signer(), seed);
     primary_fungible_store::create_primary_store_enabled_fungible_asset(
       lp_token_constructor_ref,
       option::none(),
@@ -608,25 +600,8 @@ module razor_amm::pair {
     token_symbol
   }
 
-  inline fun sort_tokens(
-    token_a: Object<Metadata>,
-    token_b: Object<Metadata>,
-  ): (Object<Metadata>, Object<Metadata>) {
-    let token_a_addr = object::object_address(&token_a);
-    let token_b_addr = object::object_address(&token_b);
-    assert!(token_a_addr != token_b_addr, ERROR_IDENTICAL_ADDRESSES);
-    let (token0, token1);
-    if (is_sorted(token_a, token_b)) {
-      (token0, token1) = (token_a, token_b)
-    } else {
-      (token0, token1) = (token_b, token_a)
-    };
-
-    (token0, token1)
-  }
-
   public inline fun get_pair_seed(token0: Object<Metadata>, token1: Object<Metadata>): vector<u8> {
-    let (tokenA, tokenB) = sort_tokens(token0, token1);
+    let (tokenA, tokenB) = sort::sort_two_tokens(token0, token1);
     let seeds = vector[];
     vector::append(&mut seeds, bcs::to_bytes(&object::object_address(&tokenA)));
     vector::append(&mut seeds, bcs::to_bytes(&object::object_address(&tokenB)));
@@ -638,12 +613,6 @@ module razor_amm::pair {
     fungible_asset::create_store(constructor_ref, token)
   }
 
-  inline fun is_sorted(token0: Object<Metadata>, token1: Object<Metadata>): bool {
-    let token0_addr = object::object_address(&token0);
-    let token1_addr = object::object_address(&token1);
-    comparator::is_smaller_than(&comparator::compare(&token0_addr, &token1_addr))
-  }
-
   fun create_lp_token_refs(constructor_ref: &ConstructorRef): LPTokenRefs {
     LPTokenRefs {
       burn_ref: fungible_asset::generate_burn_ref(constructor_ref),
@@ -653,5 +622,5 @@ module razor_amm::pair {
   }
 
   #[test_only]
-  friend razor_amm::pair_tests;
+  friend razor_amm::amm_pair_tests;
 }

@@ -1,0 +1,22 @@
+[package]
+name = "RazorAmm"
+version = "1.0.0"
+authors = []
+upgrade_policy = "compatible"
+
+[addresses]
+razor_amm = "_"
+admin = "0xfaded96b72a03b2ed9e2b2dc0bef0642d63e07fd7b1eeeac047188eb1ef34dd6"
+fee_admin = "0xdadface12f06592ecb04ea00cd11c6ff7050890881c8ec58c2011955352c9f1a"
+razor_libs = "0x16f014d37f7d8455c49d587bfc93a26eba6e3f02f1eb391e6afa620b8ffdd91d"
+bob = "0xb0b"
+alice = "0xa11ce"
+
+[dev-addresses]
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-framework.git", rev="mainnet", subdir = "aptos-framework" }
+AptosStdlib = { git = "https://github.com/aptos-labs/aptos-framework.git", rev="mainnet", subdir = "aptos-stdlib" }
+RazorLibs = { git = "https://github.com/razorlabsorg/razor-libs.git", rev="main" }
+
+[dev-dependencies]

@@ -1,12 +1,11 @@
-module razor_amm::controller {
+module razor_amm::amm_controller {
   use std::signer;
 
   use aptos_framework::object::{Self, ExtendRef};
 
-  friend razor_amm::factory;
-  friend razor_amm::pair;
-  friend razor_amm::oracle;
-  friend razor_amm::zap;
+  friend razor_amm::amm_factory;
+  friend razor_amm::amm_pair;
+  friend razor_amm::amm_oracle;
 
   const FEE_ADMIN: address = @fee_admin;
   const ADMIN: address = @admin;
@@ -23,7 +22,6 @@ module razor_amm::controller {
   const ERROR_INVALID_ADDRESS: u64 = 5;
   /// Pending Admin Exists
   const ERROR_PENDING_ADMIN_EXISTS: u64 = 6;
-
 
   /// Configuration object that manages AMM protocol settings and administrative controls.
   /// This is a singleton object stored at the @razor_amm address.
@@ -82,13 +80,13 @@ module razor_amm::controller {
   /// Asserts that the protocol is in paused state
   /// Aborts if protocol is not paused
   public fun assert_paused() acquires SwapConfig {
-    assert!(safe_swap_config().paused == true, ERROR_PAUSED);
+    assert!(safe_swap_config().paused == true, ERROR_UNPAUSED);
   }
 
   /// Asserts that the protocol is not paused
   /// Aborts if protocol is paused
   public fun assert_unpaused() acquires SwapConfig {
-    assert!(safe_swap_config().paused == false, ERROR_UNPAUSED);
+    assert!(safe_swap_config().paused == false, ERROR_PAUSED);
   }
 
   /// Pauses the protocol
@@ -166,9 +164,9 @@ module razor_amm::controller {
   }
 
   #[test_only]
-  friend razor_amm::controller_tests;
+  friend razor_amm::amm_controller_tests;
   #[test_only]
-  friend razor_amm::pair_tests;
+  friend razor_amm::amm_pair_tests;
 
   #[test_only]
   public fun initialize_for_testing(sender: &signer) {

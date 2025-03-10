@@ -1,0 +1,15 @@
+[package]
+name = "aptos-pump-fun"
+version = "1.0.0"
+upgrade_policy = "compatible"
+
+
+[addresses]
+pump = "d1de0e8ce413bde8101a8cb5029c4228b5272310894f9bb74fe91528178e083d"
+razor_amm = "0xc4e68f29fa608d2630d11513c8de731b09a975f2f75ea945160491b9bfd36992"
+
+[dependencies]
+AptosFramework = { local = "../framework/aptos-framework" }
+AptosStdlib = { local = "../framework/aptos-stdlib" }
+RazorAmm = { local = "../RazorAmm/" }
+
