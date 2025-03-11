@@ -286,7 +286,7 @@ module pump::pump_fa {
             pump_admin,
             PumpConfig {
                 platform_fee: 50,
-                platform_fee_address: @pump,
+                platform_fee_address: @fee_address,
                 resource_cap: signer_cap,
                 initial_virtual_token_reserves: 100_000_000 * DECIMALS,
                 initial_virtual_move_reserves: 30 * DECIMALS,
