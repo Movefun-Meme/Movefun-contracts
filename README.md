@@ -7,8 +7,8 @@ MoveFun prevents rugs by ensuring that all created tokens are safe. Each coin on
 1. 📊 Pick a coin that you like
 2. 💰 Buy the coin on the bonding curve
 3. 📈 Sell at any time to lock in your profits or losses
-4. 🚀 When enough people buy on the bonding curve and it reaches a market cap of 3 MOVE, the token enters the pump phase. In this phase, you can only buy but not sell. If the last buyer is not outbid within 1 hour, they will be awarded 10% of the remaining token supply.
-5. 🔥 After that, liquidity is deposited in Razor and burned.
+4. 🚀 When enough people buy on the bonding curve and it reaches a market cap of 100_000 MOVE, the token enters the pump phase. In this phase, you can only buy but not sell. If the last buyer is not outbid within 1 hour, they will be awarded 10% of the remaining token supply.
+5. 🔥 After that, liquidity is deposited in Razor dex.
 
 ## Why Choose MoveFun? 🌟
 
