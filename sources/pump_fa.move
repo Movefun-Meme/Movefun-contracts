@@ -289,9 +289,9 @@ module pump::pump_fa {
                 platform_fee_address: @fee_address,
                 resource_cap: signer_cap,
                 initial_virtual_token_reserves: 100_000_000 * DECIMALS,
-                initial_virtual_move_reserves: 300 * DECIMALS,
+                initial_virtual_move_reserves: 100_000 * DECIMALS,
                 token_decimals: 8,
-                dex_transfer_threshold: 100_000 * DECIMALS,
+                dex_transfer_threshold: 50_000 * DECIMALS,
                 wait_duration: 3600, // 1 hours = 3600 seconds
                 min_move_amount: 100_000_000, // Minimum purchase amount = 100_000_000 (1 MOVE)
                 high_fee: 1000, // High fee rate period fee = 1000 (10%)
