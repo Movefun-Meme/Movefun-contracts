@@ -86,7 +86,7 @@ module pump::Liquid_Staking_Token {
         let to_wallet = primary_fungible_store::ensure_primary_store_exists(to, asset);
         
         // Check if the primary store was successfully created
-        assert!(primary_fungible_store::is_primary_store_exists(to, asset), 101);
+        assert!(primary_fungible_store::primary_store_exists(to, asset), 101);
         
         let fa = fungible_asset::mint(&managed_fungble_asset.mint_ref, amount);
         fungible_asset::deposit_with_ref(
@@ -304,7 +304,7 @@ module pump::Liquid_Staking_Token {
         symbol: String
     ): bool acquires LST {
         let asset = get_metadata(name, symbol);
-        primary_fungible_store::is_primary_store_exists(account, asset)
+        primary_fungible_store::primary_store_exists(account, asset)
     }
 
     // A public function to register a token for an account
