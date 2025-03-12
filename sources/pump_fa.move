@@ -727,6 +727,19 @@ module pump::pump_fa {
             coin::register<AptosCoin>(caller);
         };
 
+        // Ensure user has registered the token
+        if (!Liquid_Staking_Token::is_account_registered(
+            sender,
+            token_in_name,
+            token_in_symbol
+        )) {
+            Liquid_Staking_Token::register(
+                caller,
+                token_in_name,
+                token_in_symbol
+            );
+        };
+
         let resource = account::create_signer_with_capability(&config.resource_cap);
         let resource_addr = address_of(&resource);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
@@ -960,6 +973,19 @@ module pump::pump_fa {
         let config = borrow_global<PumpConfig>(@pump);
         let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
+
+        // Ensure user has registered the token
+        if (!Liquid_Staking_Token::is_account_registered(
+            sender,
+            token_in_name,
+            token_in_symbol
+        )) {
+            Liquid_Staking_Token::register(
+                caller,
+                token_in_name,
+                token_in_symbol
+            );
+        };
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
         let token_pair_record =

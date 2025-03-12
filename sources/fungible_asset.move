@@ -81,7 +81,13 @@ module pump::Liquid_Staking_Token {
     ) acquires LST, ManagedFungibleAsset {
         let asset = get_metadata(name, symbol);
         let managed_fungble_asset = authorized_borrow_refs(asset);
+        
+        // Ensure the primary store exists for the user, create if not exists
         let to_wallet = primary_fungible_store::ensure_primary_store_exists(to, asset);
+        
+        // Check if the primary store was successfully created
+        assert!(primary_fungible_store::is_primary_store_exists(to, asset), 101);
+        
         let fa = fungible_asset::mint(&managed_fungble_asset.mint_ref, amount);
         fungible_asset::deposit_with_ref(
             &managed_fungble_asset.transfer_ref, to_wallet, fa
@@ -289,5 +295,25 @@ module pump::Liquid_Staking_Token {
         let total_usdt_supply = get_total_supply(usdt_name, usdt_symbol);
         assert!(total_usdt_supply == 500, ERR_TEST);
 
+    }
+
+    // A public function to check if an account has registered the token
+    public fun is_account_registered(
+        account: address,
+        name: String,
+        symbol: String
+    ): bool acquires LST {
+        let asset = get_metadata(name, symbol);
+        primary_fungible_store::is_primary_store_exists(account, asset)
+    }
+
+    // A public function to register a token for an account
+    public fun register(
+        account: &signer,
+        name: String,
+        symbol: String
+    ) acquires LST {
+        let asset = get_metadata(name, symbol);
+        primary_fungible_store::ensure_primary_store_exists(std::signer::address_of(account), asset);
     }
 }
