@@ -40,7 +40,8 @@ module pump::pump_fa {
     const ERROR_WAIT_TIME_NOT_REACHED: u64 = 18;
     const ERROR_NO_SELL_IN_HIGH_FEE_PERIOD: u64 = 19;
     const ERROR_INSUFFICIENT_BALANCE: u64 = 20;
-
+    const ERROR_INSUFFICIENT_MOVE: u64 = 21;
+    
     // Decimal places for (8)
     const DECIMALS: u64 = 100_000_000;
 
@@ -86,8 +87,7 @@ module pump::pump_fa {
 
     struct PoolRecord has key, store {
         records: SimpleMap<address, TokenPairRecord>,
-        // real_move_reserves
-        real_move_reserves: SimpleMap<address, address>
+        token_move_balances: SimpleMap<address, u64>
     }
 
     // struct to track the last buyer
@@ -296,7 +296,7 @@ module pump::pump_fa {
                 initial_virtual_token_reserves: 100_000_000 * DECIMALS,
                 initial_virtual_move_reserves: 100_000 * DECIMALS,
                 token_decimals: 8,
-                dex_transfer_threshold: 50_000 * DECIMALS,
+                dex_transfer_threshold: 20_000 * DECIMALS,
                 wait_duration: 3600, // 1 hours = 3600 seconds
                 min_move_amount: 100_000_000, // Minimum purchase amount = 100_000_000 (1 MOVE)
                 high_fee: 1000, // High fee rate period fee = 1000 (10%)
@@ -309,7 +309,7 @@ module pump::pump_fa {
 
         let pool_record = PoolRecord {
             records: simple_map::create(),
-            real_move_reserves: simple_map::create()
+            token_move_balances: simple_map::create()
         };
         move_to(&resource_account, pool_record);
         
@@ -347,6 +347,7 @@ module pump::pump_fa {
         (liquidity_cost as u64)
     }
 
+    // Get specific token's actual MOVE balance, using token_move_balances
     #[view]
     public fun get_current_pool_move_balance(
         token_in_name: String,
@@ -355,12 +356,9 @@ module pump::pump_fa {
         let token_addr = Liquid_Staking_Token::get_fa_obj_address(token_in_name, token_in_symbol);
         let config = borrow_global<PumpConfig>(@pump);
         let resource_addr = account::get_signer_capability_address(&config.resource_cap);
-        
+
         let pool_record = borrow_global<PoolRecord>(resource_addr);
-        let move_reserve_addr = *simple_map::borrow(&pool_record.real_move_reserves, &token_addr);
-        let move_metadata = get_move_metadata();
-        
-        primary_fungible_store::balance(move_reserve_addr, move_metadata)
+        *simple_map::borrow(&pool_record.token_move_balances, &token_addr)
     }
 
     #[view]
@@ -598,13 +596,11 @@ module pump::pump_fa {
         if (pool.is_completed) {
             return 4
         };
-        
-        let move_reserve_addr = *simple_map::borrow(&pool_record.real_move_reserves, &token_addr);
-        let move_metadata = get_move_metadata();
-        let current_move_balance = primary_fungible_store::balance(move_reserve_addr, move_metadata);
+
+        let token_move_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
 
         // Stage 1: Before reaching threshold
-        if (current_move_balance < config.dex_transfer_threshold) {
+        if (token_move_balance < config.dex_transfer_threshold) {
             return 1
         };
 
@@ -682,9 +678,8 @@ module pump::pump_fa {
         let token_address = Liquid_Staking_Token::get_fa_obj_address(name, symbol);
         simple_map::add(&mut pool_record.records, token_address, token_pair_record);
         
-        simple_map::add(
-            &mut pool_record.real_move_reserves, token_address, resource_addr
-        );
+        // Initialize token's MOVE balance to 0
+        simple_map::add(&mut pool_record.token_move_balances, token_address, 0);
 
         vector::push_back(&mut token_list.token_list, token_address);
 
@@ -782,14 +777,14 @@ module pump::pump_fa {
 
         assert!(!pool.is_completed, ERROR_PUMP_COMPLETED);
 
-        // Get the MOVE storage address for the token
-        let move_reserve_addr = *simple_map::borrow(&pool_record.real_move_reserves, &token_addr);
+        // Use resource account address directly
+        let move_reserve_addr = resource_addr;
         
-        // Get the current MOVE balance
-        let current_move_balance = primary_fungible_store::balance(move_reserve_addr, move_metadata);
+        // Use token's dedicated MOVE balance
+        let token_move_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
 
         // Check high fee period
-        if (current_move_balance >= config.dex_transfer_threshold) {
+        if (token_move_balance >= config.dex_transfer_threshold) {
             // Check wait period
             if (option::is_some(&pool.last_buyer)) {
                 let last_buyer = option::borrow(&pool.last_buyer);
@@ -820,7 +815,7 @@ module pump::pump_fa {
             
             // Check user balance
             let user_move_balance = primary_fungible_store::balance(sender, move_metadata);
-            assert!(user_move_balance >= total_cost, ERROR_INSUFFICIENT_LIQUIDITY);
+            assert!(user_move_balance >= total_cost, ERROR_INSUFFICIENT_MOVE);
             
             // Transfer MOVE tokens to resource account
             primary_fungible_store::transfer(
@@ -877,6 +872,17 @@ module pump::pump_fa {
                 }
             );
             token_pair_record.pool = pool;
+
+            // Update token's MOVE balance record
+            if (simple_map::contains_key(&pool_record.token_move_balances, &token_addr)) {
+                let current_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
+                simple_map::upsert(
+                    &mut pool_record.token_move_balances, 
+                    token_addr,
+                    current_balance + (liquidity_cost as u64)
+                );
+            };
+
             return
         };
 
@@ -920,8 +926,8 @@ module pump::pump_fa {
         );
 
         // Check if high fee period is triggered
-        let will_trigger_high_fee = current_move_balance < config.dex_transfer_threshold && 
-            (current_move_balance + (liquidity_cost as u64)) >= config.dex_transfer_threshold;
+        let will_trigger_high_fee = token_move_balance < config.dex_transfer_threshold && 
+            (token_move_balance + (liquidity_cost as u64)) >= config.dex_transfer_threshold;
 
         // If high fee period is triggered, record last buyer
         if (will_trigger_high_fee) {
@@ -961,6 +967,16 @@ module pump::pump_fa {
             }
         );
         token_pair_record.pool = pool;
+
+        // Update token's MOVE balance record
+        if (simple_map::contains_key(&pool_record.token_move_balances, &token_addr)) {
+            let current_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
+            simple_map::upsert(
+                &mut pool_record.token_move_balances, 
+                token_addr,
+                current_balance + (liquidity_cost as u64)
+            );
+        };
     }
 
     //Buy MEME tokens with MOVE with slippage limit
@@ -1052,7 +1068,7 @@ module pump::pump_fa {
 
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
         let token_pair_record =
-            simple_map::borrow<address, TokenPairRecord>(
+            simple_map::borrow_mut<address, TokenPairRecord>(
                 &mut pool_record.records, &token_addr
             );
         let pool = token_pair_record.pool;
@@ -1072,12 +1088,12 @@ module pump::pump_fa {
         assert!(sell_token_amount <= token_balance, ERROR_INSUFFICIENT_BALANCE);
 
         // Get MOVE metadata and reserve address
-        let move_metadata = get_move_metadata();
-        let move_reserve_addr = *simple_map::borrow(&pool_record.real_move_reserves, &token_addr);
-        let current_move_balance = primary_fungible_store::balance(move_reserve_addr, move_metadata);
+        let move_metadata = get_move_metadata();        
+        // Use token's dedicated MOVE balance
+        let token_move_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
 
         assert!(
-            current_move_balance < config.dex_transfer_threshold,
+            token_move_balance < config.dex_transfer_threshold,
             ERROR_NO_SELL_IN_HIGH_FEE_PERIOD
         );
 
@@ -1132,6 +1148,22 @@ module pump::pump_fa {
             move_to_user
         );
 
+        // Update token's MOVE balance record (subtract sold MOVE)
+        if (simple_map::contains_key(&pool_record.token_move_balances, &token_addr)) {
+            let current_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
+            // Ensure no underflow
+            let new_balance = if (current_balance >= liquidity_remove) { 
+                current_balance - liquidity_remove
+            } else {
+                0
+            };
+            simple_map::upsert(
+                &mut pool_record.token_move_balances, 
+                token_addr,
+                new_balance
+            );
+        };
+
         // Emit trade event
         event::emit_event(
             &mut borrow_global_mut<Handle>(@pump).trade_events,
@@ -1146,7 +1178,7 @@ module pump::pump_fa {
                 timestamp: timestamp::now_seconds()
             }
         );
-        // token_pair_record.pool = pool;
+        token_pair_record.pool = pool;
     }
 
     //Sell MEME tokens for MOVE with slippage limit
@@ -1215,15 +1247,43 @@ module pump::pump_fa {
         config.deadline = new_deadline;
     }
 
-    //Update DEX transfer threshold
-    //@param admin - Admin signer with permission to update threshold
-    //@param new_threshold - New threshold value for DEX transfer
-    public entry fun update_dex_threshold(
-        admin: &signer, new_threshold: u64
-    ) acquires PumpConfig {
-        assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
-        let config = borrow_global_mut<PumpConfig>(@pump);
-        config.dex_transfer_threshold = new_threshold;
+    // Get global config
+    #[view]
+    public fun get_global_config(): (u64, u64, u64, u64, u64, u8) acquires PumpConfig {
+        let config = borrow_global<PumpConfig>(@pump);
+        (
+            config.platform_fee,
+            config.initial_virtual_token_reserves,
+            config.initial_virtual_move_reserves,
+            config.dex_transfer_threshold,
+            config.min_move_amount,
+            config.token_decimals
+        )
+    }
+
+    // Get reserves config
+    #[view]
+    public fun get_reserves_config(): (u64, u64, u64) acquires PumpConfig {
+        let config = borrow_global<PumpConfig>(@pump);
+        (
+            config.initial_virtual_token_reserves,
+            config.initial_virtual_move_reserves,
+            config.dex_transfer_threshold,
+        )
+    }
+
+    // Get platform fee
+    #[view]
+    public fun get_platform_fee(): u64 acquires PumpConfig {
+        let config = borrow_global<PumpConfig>(@pump);
+        config.platform_fee
+    }
+
+    // Get platform fee address
+    #[view]
+    public fun get_platform_fee_address(): address acquires PumpConfig {
+        let config = borrow_global<PumpConfig>(@pump);
+        config.platform_fee_address
     }
 
     //Update platform fee rate
@@ -1246,6 +1306,32 @@ module pump::pump_fa {
         config.platform_fee_address = new_address;
     }
 
+    //Update virtual reserves for new pools
+    //@param admin - Admin signer with permission to update virtual reserves
+    //@param new_virtual_token_reserves - New value for initial virtual token reserves
+    //@param new_virtual_move_reserves - New value for initial virtual MOVE reserves
+    public entry fun update_virtual_reserves(
+        admin: &signer,
+        new_virtual_token_reserves: u64,
+        new_virtual_move_reserves: u64
+    ) acquires PumpConfig {
+        assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
+        let config = borrow_global_mut<PumpConfig>(@pump);
+        config.initial_virtual_token_reserves = new_virtual_token_reserves;
+        config.initial_virtual_move_reserves = new_virtual_move_reserves;
+    }
+
+    //Update DEX transfer threshold
+    //@param admin - Admin signer with permission to update threshold
+    //@param new_threshold - New threshold value for DEX transfer
+    public entry fun update_dex_threshold(
+        admin: &signer, new_threshold: u64
+    ) acquires PumpConfig {
+        assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
+        let config = borrow_global_mut<PumpConfig>(@pump);
+        config.dex_transfer_threshold = new_threshold;
+    }
+    
     // ========================================= Migration Part ========================================
     // Claim migration right
     public entry fun claim_migration_right(
@@ -1257,73 +1343,61 @@ module pump::pump_fa {
         let resource_addr = account::get_signer_capability_address(&config.resource_cap);
         assert!(exists<PoolRecord>(resource_addr), ERROR_PUMP_NOT_EXIST);
         let token_addr = Liquid_Staking_Token::get_fa_obj_address(name, symbol);
+        
+        // Get the last buyer and validate conditions
+        {
+            let pool_record = borrow_global<PoolRecord>(resource_addr);
+            let token_pair_record = simple_map::borrow(&pool_record.records, &token_addr);
+            
+            assert!(option::is_some(&token_pair_record.pool.last_buyer), ERROR_NO_LAST_BUYER);
+            let last_buyer = option::borrow(&token_pair_record.pool.last_buyer);
+            
+            assert!(
+                timestamp::now_seconds() >= last_buyer.timestamp + config.wait_duration,
+                ERROR_WAIT_TIME_NOT_REACHED
+            );
+        };
+        
+        // Now perform the migration
+        let config = borrow_global<PumpConfig>(@pump);
+        let resource_signer = account::create_signer_with_capability(&config.resource_cap);
+        
+        // Get pool record and token pair record
         let pool_record = borrow_global_mut<PoolRecord>(resource_addr);
         let token_pair_record = simple_map::borrow_mut<address, TokenPairRecord>(
             &mut pool_record.records, &token_addr
         );
-
-        assert!(option::is_some(&token_pair_record.pool.last_buyer), ERROR_NO_LAST_BUYER);
-        let last_buyer = option::borrow(&token_pair_record.pool.last_buyer);
-
-        assert!(
-            timestamp::now_seconds() >= last_buyer.timestamp + config.wait_duration,
-            ERROR_WAIT_TIME_NOT_REACHED
-        );
-
-        let winner_address = last_buyer.buyer;
-        let move_reserve_addr = simple_map::borrow_mut<address, address>(
-            &mut pool_record.real_move_reserves, &token_addr
-        );
-        migrate_to_razor_dex(
-            caller,
-            name,
-            symbol,
-            token_pair_record,
-            move_reserve_addr,
-            winner_address
-        );
-    }
-
-    /*
-    Migrates the pump pool to razor DEX
-    */
-    fun migrate_to_razor_dex(
-        caller: &signer,
-        name: String, 
-        symbol: String,
-        token_pair_record: &mut TokenPairRecord,
-        real_move_reserves: &mut address,
-        winner_address: address
-    ) acquires PumpConfig, Handle {
-        let sender = address_of(caller);
-        let token_addr = Liquid_Staking_Token::get_fa_obj_address(name, symbol);
-        let config = borrow_global<PumpConfig>(@pump);
-        let resource_addr = account::get_signer_capability_address(&config.resource_cap);
-        let resource_signer = account::create_signer_with_capability(&config.resource_cap);
-
-        let pool = token_pair_record.pool;
+        
+        let pool = &mut token_pair_record.pool;
         
         // Check if pool is completed
         assert!(!pool.is_completed, ERROR_PUMP_COMPLETED);
-
+        
+        // Get the winner address
+        assert!(option::is_some(&pool.last_buyer), ERROR_NO_LAST_BUYER);
+        let last_buyer = option::borrow(&pool.last_buyer);
+        let winner_address = last_buyer.buyer;
+        
         let move_metadata = get_move_metadata();
         let token_metadata = Liquid_Staking_Token::get_metadata(name, symbol);
-        let real_move_amount = primary_fungible_store::balance(*real_move_reserves, move_metadata);
-
+        
+        // Get token's dedicated MOVE balance
+        let token_move_balance = *simple_map::borrow(&pool_record.token_move_balances, &token_addr);
+        
         // Check migration threshold
         assert!(
-            real_move_amount >= config.dex_transfer_threshold,
+            token_move_balance >= config.dex_transfer_threshold,
             ERROR_INSUFFICIENT_LIQUIDITY
         );
-
+        
         let virtual_price = 
             (pool.virtual_move_reserves as u256) * 100_000_000 
                 / (pool.virtual_token_reserves as u256);
-
-        let required_token = (((real_move_amount as u256) * 100_000_000 / virtual_price) as u64);
+        
+        let required_token = (((token_move_balance as u256) * 100_000_000 / virtual_price) as u64);
         let burned_amount = pool.virtual_token_reserves - required_token;
         pool.is_completed = true;
-
+        
         // Reward winner (10% of tokens)
         let reward_amount = pool.virtual_token_reserves / 10;
         Liquid_Staking_Token::mint(
@@ -1332,7 +1406,7 @@ module pump::pump_fa {
             token_pair_record.name,
             token_pair_record.symbol
         );
-
+        
         // Extract gas fee (1 MOVE)
         let gas_amount = 100_000_000;
         primary_fungible_store::transfer(
@@ -1341,16 +1415,7 @@ module pump::pump_fa {
             config.platform_fee_address,
             gas_amount
         );
-
-        // Transfer remaining MOVE to resource account
-        let remaining_amount = real_move_amount - gas_amount;
-        primary_fungible_store::transfer(
-            &resource_signer,
-            move_metadata,
-            resource_addr,
-            remaining_amount
-        );
-
+        
         // Mint tokens to resource account
         Liquid_Staking_Token::mint(
             resource_addr,
@@ -1358,7 +1423,7 @@ module pump::pump_fa {
             token_pair_record.name,
             token_pair_record.symbol
         );
-
+        
         // Check pool existence and get token balances
         let available_token = primary_fungible_store::balance(resource_addr, token_metadata);
         let available_move = primary_fungible_store::balance(resource_addr, move_metadata);
@@ -1427,12 +1492,21 @@ module pump::pump_fa {
                 timestamp::now_seconds() + config.deadline
             );
         };
-
+        
+        // Reset token's MOVE balance after migration
+        simple_map::upsert(
+            &mut pool_record.token_move_balances, 
+            token_addr,
+            0 // Reset balance to zero
+        );
+        
+        let sender = address_of(caller);
+        
         // Emit transfer event
         event::emit_event(
             &mut borrow_global_mut<Handle>(@pump).transfer_events,
             TransferEvent {
-                move_amount: real_move_amount,
+                move_amount: token_move_balance,
                 token_address: token_addr,
                 token_amount: required_token,
                 user: sender,
@@ -1441,9 +1515,8 @@ module pump::pump_fa {
                 burned_amount
             }
         );
-        token_pair_record.pool = pool;
     }
-
+    
     fun get_move_metadata(): Object<Metadata> {
         object::address_to_object<Metadata>(MOVE_METADATA_ADDRESS)
     }
