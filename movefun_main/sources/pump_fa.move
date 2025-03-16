@@ -45,6 +45,9 @@ module pump::pump_fa {
     // Decimal places for (8)
     const DECIMALS: u64 = 100_000_000;
 
+    // Gas amount for migration 0.1 MOVE
+    const MIGRATION_GAS_AMOUNT: u64 = 10_000_000;
+
     // Define a constant for the metadata address of the MOVE token
     const MOVE_METADATA_ADDRESS: address = @move_metadata_address;
 
@@ -1399,7 +1402,7 @@ module pump::pump_fa {
         pool.is_completed = true;
         
         // Reward winner (10% of tokens)
-        let reward_amount = pool.virtual_token_reserves / 10;
+        let reward_amount = burned_amount / 10;
         Liquid_Staking_Token::mint(
             winner_address,
             reward_amount,
@@ -1407,13 +1410,12 @@ module pump::pump_fa {
             token_pair_record.symbol
         );
         
-        // Extract gas fee (1 MOVE)
-        let gas_amount = 100_000_000;
+
         primary_fungible_store::transfer(
             &resource_signer,
             move_metadata,
             config.platform_fee_address,
-            gas_amount
+            MIGRATION_GAS_AMOUNT
         );
         
         // Mint tokens to resource account
@@ -1425,8 +1427,8 @@ module pump::pump_fa {
         );
         
         // Check pool existence and get token balances
-        let available_token = primary_fungible_store::balance(resource_addr, token_metadata);
-        let available_move = primary_fungible_store::balance(resource_addr, move_metadata);
+        let available_token = required_token;
+        let available_move = token_move_balance - MIGRATION_GAS_AMOUNT;
         
         // Set minimum values to zero (no price protection)
         let min_token = 0;
@@ -1439,7 +1441,7 @@ module pump::pump_fa {
             // Get current pool reserves
             let (reserve_token, reserve_move) = amm_factory::get_reserves(token_addr, MOVE_METADATA_ADDRESS);
             
-            if (reserve_token > 0 && reserve_move > 0) {
+            if (reserve_token > 0 || reserve_move > 0) {
                 // Step 1: Add liquidity according to pool ratio
                 router::add_liquidity_move(
                     &resource_signer,
