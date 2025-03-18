@@ -1212,40 +1212,17 @@ module pump::pump_fa {
     }
 
     //Update configuration
-    //@param admin - Admin signer with permission to update config
-    //@param new_platform_fee - New platform fee rate (in basis points)
-    //@param new_platform_fee_address - New address to receive platform fees
-    //@param new_initial_virtual_token_reserves - New initial virtual token reserves
-    //@param new_initial_virtual_move_reserves - New initial virtual MOVE reserves
-    //@param new_token_decimals - New token decimals
-    //@param new_dex_transfer_threshold - New threshold for DEX transfer
-    //@param new_high_fee - New high fee rate (in basis points)
-    //@param new_wait_duration - New wait duration in seconds
-    //@param new_min_move_amount - New minimum MOVE amount for purchases
-    public entry fun update_config(
+    public entry fun update_other_config(
         admin: &signer,
-        new_platform_fee: u64,
-        new_platform_fee_address: address,
-        new_initial_virtual_token_reserves: u64,
-        new_initial_virtual_move_reserves: u64,
         new_token_decimals: u8,
-        new_dex_transfer_threshold: u64,
         new_high_fee: u64,
-        new_wait_duration: u64,
         new_min_move_amount: u64,
         new_deadline: u64
     ) acquires PumpConfig {
         assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
         let config = borrow_global_mut<PumpConfig>(@pump);
-
-        config.platform_fee = new_platform_fee;
-        config.platform_fee_address = new_platform_fee_address;
-        config.initial_virtual_token_reserves = new_initial_virtual_token_reserves;
-        config.initial_virtual_move_reserves = new_initial_virtual_move_reserves;
         config.token_decimals = new_token_decimals;
-        config.dex_transfer_threshold = new_dex_transfer_threshold;
         config.high_fee = new_high_fee;
-        config.wait_duration = new_wait_duration;
         config.min_move_amount = new_min_move_amount;
         config.deadline = new_deadline;
     }
@@ -1287,6 +1264,13 @@ module pump::pump_fa {
     public fun get_platform_fee_address(): address acquires PumpConfig {
         let config = borrow_global<PumpConfig>(@pump);
         config.platform_fee_address
+    }
+
+    // Get wait duration
+    #[view]
+    public fun get_wait_duration(): u64 acquires PumpConfig {
+        let config = borrow_global<PumpConfig>(@pump);
+        config.wait_duration
     }
 
     //Update platform fee rate
@@ -1333,6 +1317,17 @@ module pump::pump_fa {
         assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
         let config = borrow_global_mut<PumpConfig>(@pump);
         config.dex_transfer_threshold = new_threshold;
+    }
+    
+    // Update wait duration
+    //@param admin - Admin signer with permission to update wait duration
+    //@param new_duration - New wait duration value
+    public entry fun update_wait_duration(
+        admin: &signer, new_duration: u64
+    ) acquires PumpConfig {
+        assert!(address_of(admin) == @pump, ERROR_NO_AUTH);
+        let config = borrow_global_mut<PumpConfig>(@pump);
+        config.wait_duration = new_duration;
     }
     
     // ========================================= Migration Part ========================================
@@ -1442,32 +1437,25 @@ module pump::pump_fa {
             let (reserve_token, reserve_move) = amm_factory::get_reserves(token_addr, MOVE_METADATA_ADDRESS);
             
             if (reserve_token > 0 || reserve_move > 0) {
-                // Step 1: Add liquidity according to pool ratio
-                router::add_liquidity_move(
+                // Swap all tokens to MOVE
+                router::swap_exact_tokens_for_move(
                     &resource_signer,
-                    token_addr,
                     available_token,
-                    min_token,  // No minimum protection
+                    0, // No minimum output
+                    vector[token_addr, MOVE_METADATA_ADDRESS],
+                    config.platform_fee_address,
+                    timestamp::now_seconds() + config.deadline
+                );
+
+                // Swap all MOVE to tokens
+                router::swap_exact_move_for_tokens(
+                    &resource_signer,
                     available_move,
-                    min_move,   // No minimum protection
+                    0, // No minimum output
+                    vector[MOVE_METADATA_ADDRESS, token_addr],
                     resource_addr,
                     timestamp::now_seconds() + config.deadline
                 );
-                
-                // Step 2: Check remaining MOVE and swap if needed
-                let remaining_move = primary_fungible_store::balance(resource_addr, move_metadata);
-                
-                if (remaining_move > 0) {
-                    // Swap all remaining MOVE to tokens
-                    router::swap_exact_move_for_tokens(
-                        &resource_signer,
-                        remaining_move,
-                        0, // No minimum output
-                        vector[MOVE_METADATA_ADDRESS, token_addr],
-                        config.platform_fee_address,
-                        timestamp::now_seconds() + config.deadline
-                    );
-                }
             } else {
                 // Pool exists but no liquidity, add directly
                 router::add_liquidity_move(
