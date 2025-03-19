@@ -176,8 +176,8 @@ module pump::pump_fa {
         let reserve_diff = token_reserves - token_amount;
         assert!(reserve_diff > 0, ERROR_INSUFFICIENT_LIQUIDITY);
         let div_part1 = ((move_reserves * token_reserves) / reserve_diff);
-        let div_part2 = ((move_reserves * token_reserves * 100) / reserve_diff);
-        if (div_part1 * 100 < div_part2) {
+        let div_part2 = ((move_reserves * token_reserves * 10000_0000) / reserve_diff);
+        if (div_part1 * 10000_0000 < div_part2) {
             div_part1 = div_part1 + 1;
         };
 
@@ -297,7 +297,7 @@ module pump::pump_fa {
                 platform_fee_address: @fee_address,
                 resource_cap: signer_cap,
                 initial_virtual_token_reserves: 100_000_000 * DECIMALS,
-                initial_virtual_move_reserves: 100_000 * DECIMALS,
+                initial_virtual_move_reserves: 50_000 * DECIMALS,
                 token_decimals: 8,
                 dex_transfer_threshold: 20_000 * DECIMALS,
                 wait_duration: 3600, // 1 hours = 3600 seconds
@@ -910,7 +910,7 @@ module pump::pump_fa {
         
         // Check user balance
         let user_move_balance = primary_fungible_store::balance(sender, move_metadata);
-        assert!(user_move_balance >= total_cost, ERROR_INSUFFICIENT_LIQUIDITY);
+        assert!(user_move_balance >= total_cost, ERROR_INSUFFICIENT_MOVE);
         
         // Transfer MOVE tokens to resource account
         primary_fungible_store::transfer(
